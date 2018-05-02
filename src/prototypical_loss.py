@@ -39,7 +39,22 @@ def euclidean_dist(x, y):
     return torch.pow(x - y, 2).sum(2)
 
 
-def prototypical_loss(input, target, n_support):
+def obtain_mean(input, target, n_support):
+    cputargs = target.cpu() if target.is_cuda else target
+    cputargs = cputargs.data
+    cpuinput = input.cpu() if target.is_cuda else input
+
+    def supp_idxs(c):
+        return torch.nonzero(cputargs.eq(int(c)))[:n_support].squeeze()
+
+    classes = np.unique(cputargs)
+    os_idxs = list(map(supp_idxs, classes))
+
+    prototypes = torch.stack([cpuinput[i].mean(0) for i in os_idxs])
+    return prototypes
+
+
+def prototypical_loss(input, prototypes, target, n_support, inner_loop=False):
     '''
     Inspired by https://github.com/jakesnell/prototypical-networks/blob/master/protonets/models/few_shot.py
 
@@ -57,30 +72,30 @@ def prototypical_loss(input, target, n_support):
     '''
     cputargs = target.cpu() if target.is_cuda else target
     cputargs = cputargs.data
-    cpuinput = input.cpu() if target.is_cuda else input
-
-    def supp_idxs(c):
-        return torch.nonzero(cputargs.eq(int(c)))[:n_support].squeeze()
-
     classes = np.unique(cputargs)
     n_classes = len(classes)
     n_query = len(torch.nonzero(cputargs.eq(int(classes[0])))) - n_support
 
-    os_idxs = list(map(supp_idxs, classes))
-
-    prototypes = torch.stack([cpuinput[i].mean(0) for i in os_idxs])
-
     prototypes = prototypes.cuda() if target.is_cuda else prototypes
-    oq_idxs_0 = torch.stack(list(map(lambda c: torch.nonzero(cputargs.eq(int(c)))[n_support:], classes))).view(-1)
+    if inner_loop:
+        oq_idxs_0 = torch.stack(list(map(lambda c: torch.nonzero(cputargs.eq(int(c)))[:n_support], classes))).view(-1)
+    else:
+        oq_idxs_0 = torch.stack(list(map(lambda c: torch.nonzero(cputargs.eq(int(c)))[n_support:], classes))).view(-1)
     oq_idxs_0 = oq_idxs_0.cuda() if target.is_cuda else oq_idxs_0
     oq = input[oq_idxs_0]
     dists = euclidean_dist(oq, prototypes)
 
-    log_p_y = F.log_softmax(-dists, dim=1).view(n_classes, n_query, -1)
+    if inner_loop:
+        log_p_y = F.log_softmax(-dists, dim=1).view(n_classes, n_support, -1)
+    else:
+        log_p_y = F.log_softmax(-dists, dim=1).view(n_classes, n_query, -1)
 
     target_inds = torch.arange(0, n_classes)
     target_inds = target_inds.view(n_classes, 1, 1)
-    target_inds = target_inds.expand(n_classes, n_query, 1).long()
+    if inner_loop:
+        target_inds = target_inds.expand(n_classes, n_support, 1).long()
+    else:
+        target_inds = target_inds.expand(n_classes, n_query, 1).long()
     target_inds = target_inds.long()
     target_inds = Variable(target_inds, requires_grad=False)
     target_inds = target_inds.cuda() if target.is_cuda else target_inds
@@ -91,3 +106,7 @@ def prototypical_loss(input, target, n_support):
     acc_val = torch.eq(y_hat, target_inds.squeeze()).float().mean()
 
     return loss_val,  acc_val
+
+def full_loss(input, target, n_support, inner_loop=False):
+    prototypes = obtain_mean(input, target, n_support)
+    return prototypical_loss(input, prototypes, target, n_support, inner_loop)

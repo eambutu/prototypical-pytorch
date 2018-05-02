@@ -4,10 +4,10 @@ import argparse
 
 def get_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-root', '--dataset_root',
+    parser.add_argument('-data', '--dataset',
                         type=str,
-                        help='path to dataset',
-                        default='../dataset')
+                        help='Name of dataset, omniglot/mini_imagenet',
+                        default='omniglot')
 
     parser.add_argument('-exp', '--experiment_root',
                         type=str,

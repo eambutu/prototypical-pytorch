@@ -10,7 +10,6 @@ import numpy as np
 from parser import get_parser
 from tqdm import tqdm
 import os
-import copy
 
 
 def init_seed(opt):
@@ -28,48 +27,18 @@ def init_dataset(opt):
     Initialize the datasets, samplers and dataloaders
     '''
     if opt.dataset == 'omniglot':
-        train_dataset = OmniglotDataset(mode='train')
-        val_dataset = OmniglotDataset(mode='val')
-        trainval_dataset = OmniglotDataset(mode='trainval')
         test_dataset = OmniglotDataset(mode='test')
     elif opt.dataset == 'mini_imagenet':
-        train_dataset = MiniImagenetDataset(mode='train')
-        val_dataset = MiniImagenetDataset(mode='val')
-        trainval_dataset = MiniImagenetDataset(mode='val')
         test_dataset = MiniImagenetDataset(mode='test')
-
-    tr_sampler = PrototypicalBatchSampler(labels=train_dataset.y,
-                                          classes_per_it=opt.classes_per_it_tr,
-                                          num_samples=opt.num_support_tr + opt.num_query_tr,
-                                          iterations=opt.iterations)
-
-    val_sampler = PrototypicalBatchSampler(labels=val_dataset.y,
-                                           classes_per_it=opt.classes_per_it_val,
-                                           num_samples=opt.num_support_val + opt.num_query_val,
-                                           iterations=opt.iterations)
-
-    trainval_sampler = PrototypicalBatchSampler(labels=trainval_dataset.y,
-                                                classes_per_it=opt.classes_per_it_tr,
-                                                num_samples=opt.num_support_tr + opt.num_query_tr,
-                                                iterations=opt.iterations)
 
     test_sampler = PrototypicalBatchSampler(labels=test_dataset.y,
                                             classes_per_it=opt.classes_per_it_val,
                                             num_samples=opt.num_support_val + opt.num_query_val,
                                             iterations=opt.iterations)
 
-    tr_dataloader = torch.utils.data.DataLoader(train_dataset,
-                                                batch_sampler=tr_sampler)
-
-    val_dataloader = torch.utils.data.DataLoader(val_dataset,
-                                                 batch_sampler=val_sampler)
-
-    trainval_dataloader = torch.utils.data.DataLoader(trainval_dataset,
-                                                      batch_sampler=trainval_sampler)
-
     test_dataloader = torch.utils.data.DataLoader(test_dataset,
                                                   batch_sampler=test_sampler)
-    return tr_dataloader, val_dataloader, trainval_dataloader, test_dataloader
+    return test_dataloader
 
 
 def init_protonet(opt):
@@ -152,7 +121,7 @@ def train(opt, tr_dataloader, model, optim, lr_scheduler, val_dataloader=None):
             if opt.cuda:
                 x, y = x.cuda(), y.cuda()
             model_output = model(x)
-            l, acc = loss(model_output, target=y, n_support=opt.num_support_val) 
+            l, acc = loss(model_output, target=y, n_support=opt.num_support_val)
             val_loss.append(l.data[0])
             val_acc.append(acc.data[0])
         avg_loss = np.mean(val_loss[-opt.iterations:])
@@ -187,7 +156,7 @@ def test(opt, test_dataloader, model):
             if opt.cuda:
                 x, y = x.cuda(), y.cuda()
             model_output = model(x)
-            l, acc = loss(model_output, target=y, n_support=opt.num_support_tr)
+            _, acc = loss(model_output, target=y, n_support=opt.num_support_tr)
             avg_acc.append(acc.data[0])
     avg_acc = np.mean(avg_acc)
     print('Test Acc: {}'.format(avg_acc))

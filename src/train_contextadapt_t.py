@@ -4,7 +4,7 @@ from omniglot_dataset import OmniglotDataset
 from mini_imagenet_dataset import MiniImagenetDataset
 from protonet import ProtoNet
 import torch
-from prototypical_loss import full_loss as loss
+from prototypical_loss import obtain_mean, prototypical_loss, full_loss
 from torch.autograd import Variable
 import numpy as np
 from parser import get_parser
@@ -12,6 +12,7 @@ from tqdm import tqdm
 import os
 import copy
 
+inner_lr = 1
 
 def init_seed(opt):
     '''
@@ -117,6 +118,10 @@ def train(opt, tr_dataloader, model, optim, lr_scheduler, val_dataloader=None):
     train_acc = []
     val_loss = []
     val_acc = []
+    pre_metatrain_loss = []
+    pre_metatrain_acc = []
+    post_metatrain_loss = []
+    post_metatrain_acc = []
     best_acc = 0
 
     best_model_path = os.path.join(opt.experiment_root, 'best_model.pth')
@@ -133,7 +138,7 @@ def train(opt, tr_dataloader, model, optim, lr_scheduler, val_dataloader=None):
             if opt.cuda:
                 x, y = x.cuda(), y.cuda()
             model_output = model(x)
-            l, acc = loss(model_output, target=y, n_support=opt.num_support_tr)
+            l, acc = full_loss(model_output, target=y, n_support=opt.num_support_tr)
             l.backward()
             optim.step()
             train_loss.append(l.data[0])
@@ -152,15 +157,31 @@ def train(opt, tr_dataloader, model, optim, lr_scheduler, val_dataloader=None):
             if opt.cuda:
                 x, y = x.cuda(), y.cuda()
             model_output = model(x)
-            l, acc = loss(model_output, target=y, n_support=opt.num_support_val) 
+            means = obtain_mean(model_output, y, opt.num_support_tr)
+            means.retain_grad()
+            l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr, inner_loop=True)
+            l.backward()
+            pre_metatrain_loss.append(l.data[0])
+            pre_metatrain_acc.append(acc.data[0])
+            means = means - inner_lr * means.grad
+            l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr)
             val_loss.append(l.data[0])
             val_acc.append(acc.data[0])
+            l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr, inner_loop=True)
+            post_metatrain_loss.append(l.data[0])
+            post_metatrain_acc.append(acc.data[0])
         avg_loss = np.mean(val_loss[-opt.iterations:])
         avg_acc = np.mean(val_acc[-opt.iterations:])
+        avg_pre_metatrain_loss = np.mean(pre_metatrain_loss[-opt.iterations:])
+        avg_pre_metatrain_acc = np.mean(pre_metatrain_acc[-opt.iterations:])
+        avg_post_metatrain_loss = np.mean(post_metatrain_loss[-opt.iterations:])
+        avg_post_metatrain_acc = np.mean(post_metatrain_acc[-opt.iterations:])
         postfix = ' (Best)' if avg_acc >= best_acc else ' (Best: {})'.format(
             best_acc)
         print('Avg Val Loss: {}, Avg Val Acc: {}{}'.format(
             avg_loss, avg_acc, postfix))
+        print('Avg Pre Metatrain Loss: {}, Avg Pre Metatrain Acc: {}'.format(avg_pre_metatrain_loss, avg_pre_metatrain_acc))
+        print('Avg Post Metatrain Loss: {}, Avg Post Metatrain Acc: {}'.format(avg_post_metatrain_loss, avg_post_metatrain_acc))
         if avg_acc >= best_acc:
             torch.save(model.state_dict(), best_model_path)
             best_acc = avg_acc
@@ -174,11 +195,12 @@ def train(opt, tr_dataloader, model, optim, lr_scheduler, val_dataloader=None):
     return best_state, best_acc, train_loss, train_acc, val_loss, val_acc
 
 
-def test(opt, test_dataloader, model):
+def test(opt, test_dataloader, model, optim):
     '''
     Test the model trained with the prototypical learning algorithm
     '''
     avg_acc = list()
+
     for epoch in range(10):
         test_iter = iter(test_dataloader)
         for batch in test_iter:
@@ -187,7 +209,13 @@ def test(opt, test_dataloader, model):
             if opt.cuda:
                 x, y = x.cuda(), y.cuda()
             model_output = model(x)
-            l, acc = loss(model_output, target=y, n_support=opt.num_support_tr)
+            means = obtain_mean(model_output, y, opt.num_support_tr)
+            means.retain_grad()
+            l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr, inner_loop=True)
+            l.backward()
+            means = means - inner_lr * means.grad
+            l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr)
+
             avg_acc.append(acc.data[0])
     avg_acc = np.mean(avg_acc)
     print('Test Acc: {}'.format(avg_acc))
@@ -242,13 +270,15 @@ def main():
     print('Testing with last model..')
     test(opt=options,
          test_dataloader=test_dataloader,
-         model=model)
+         model=model,
+         optim=optim)
 
     model.load_state_dict(best_state)
     print('Testing with best model..')
     test(opt=options,
          test_dataloader=test_dataloader,
-         model=model)
+         model=model,
+         optim=optim)
 
     # optim = init_optim(options, model)
     # lr_scheduler = init_lr_scheduler(options, optim)

@@ -1,4 +1,5 @@
 # coding=utf-8
+from collections import OrderedDict
 from prototypical_batch_sampler import PrototypicalBatchSampler
 from omniglot_dataset import OmniglotDataset
 from mini_imagenet_dataset import MiniImagenetDataset
@@ -12,6 +13,8 @@ from tqdm import tqdm
 import os
 import copy
 
+
+inner_lr = 0.001
 
 def init_seed(opt):
     '''
@@ -117,10 +120,18 @@ def train(opt, tr_dataloader, model, optim, lr_scheduler, val_dataloader=None):
     train_acc = []
     val_loss = []
     val_acc = []
+    pre_metatrain_loss = []
+    pre_metatrain_acc = []
+    post_metatrain_loss = []
+    post_metatrain_acc = []
     best_acc = 0
 
     best_model_path = os.path.join(opt.experiment_root, 'best_model.pth')
     last_model_path = os.path.join(opt.experiment_root, 'last_model.pth')
+
+    copy_net = init_protonet(opt)
+    copy_opt = torch.optim.Adam(params=copy_net.parameters(),
+                                lr=opt.learning_rate)
 
     for epoch in range(opt.epochs):
         print('=== Epoch: {} ==='.format(epoch))
@@ -132,8 +143,15 @@ def train(opt, tr_dataloader, model, optim, lr_scheduler, val_dataloader=None):
             x, y = Variable(x), Variable(y)
             if opt.cuda:
                 x, y = x.cuda(), y.cuda()
+
             model_output = model(x)
-            l, acc = loss(model_output, target=y, n_support=opt.num_support_tr)
+            l, acc = loss(model_output, target=y, n_support=opt.num_support_tr, inner_loop=True)
+            grads = torch.autograd.grad(l, model.parameters(), create_graph=True)
+
+            adapted_weights = OrderedDict((name, param - inner_lr * grad) for ((name, param), grad) in zip(model.named_parameters(), grads))
+            model_output_adapt = model(x, adapted_weights)
+            l, acc = loss(model_output_adapt, target=y, n_support=opt.num_support_tr)
+
             l.backward()
             optim.step()
             train_loss.append(l.data[0])
@@ -147,20 +165,40 @@ def train(opt, tr_dataloader, model, optim, lr_scheduler, val_dataloader=None):
         val_iter = iter(val_dataloader)
         model.eval()
         for batch in val_iter:
+            copy_net.load_state_dict(model.state_dict())
+            cur_opt = optim.state_dict()
+            copy_opt.__setstate__(cur_opt['state'])
+            copy_opt.zero_grad()
             x, y = batch
             x, y = Variable(x), Variable(y)
             if opt.cuda:
                 x, y = x.cuda(), y.cuda()
-            model_output = model(x)
-            l, acc = loss(model_output, target=y, n_support=opt.num_support_val) 
+            model_output = copy_net(x)
+            l, acc = loss(model_output, target=y, n_support=opt.num_support_val, inner_loop=True)
+            pre_metatrain_loss.append(l.data[0])
+            pre_metatrain_acc.append(acc.data[0])
+            l.backward()
+            copy_opt.step()
+
+            model_output = copy_net(x)
+            l, acc = loss(model_output, target=y, n_support=opt.num_support_val)
             val_loss.append(l.data[0])
             val_acc.append(acc.data[0])
+            l, acc = loss(model_output, target=y, n_support=opt.num_support_val, inner_loop=True)
+            post_metatrain_loss.append(l.data[0])
+            post_metatrain_acc.append(acc.data[0])
         avg_loss = np.mean(val_loss[-opt.iterations:])
         avg_acc = np.mean(val_acc[-opt.iterations:])
+        avg_pre_metatrain_loss = np.mean(pre_metatrain_loss[-opt.iterations:])
+        avg_pre_metatrain_acc = np.mean(pre_metatrain_acc[-opt.iterations:])
+        avg_post_metatrain_loss = np.mean(post_metatrain_loss[-opt.iterations:])
+        avg_post_metatrain_acc = np.mean(post_metatrain_acc[-opt.iterations:])
         postfix = ' (Best)' if avg_acc >= best_acc else ' (Best: {})'.format(
             best_acc)
         print('Avg Val Loss: {}, Avg Val Acc: {}{}'.format(
             avg_loss, avg_acc, postfix))
+        print('Avg Pre Metatrain Loss: {}, Avg Pre Metatrain Acc: {}'.format(avg_pre_metatrain_loss, avg_pre_metatrain_acc))
+        print('Avg Post Metatrain Loss: {}, Avg Post Metatrain Acc: {}'.format(avg_post_metatrain_loss, avg_post_metatrain_acc))
         if avg_acc >= best_acc:
             torch.save(model.state_dict(), best_model_path)
             best_acc = avg_acc
@@ -174,20 +212,35 @@ def train(opt, tr_dataloader, model, optim, lr_scheduler, val_dataloader=None):
     return best_state, best_acc, train_loss, train_acc, val_loss, val_acc
 
 
-def test(opt, test_dataloader, model):
+def test(opt, test_dataloader, model, optim):
     '''
     Test the model trained with the prototypical learning algorithm
     '''
     avg_acc = list()
+
+    copy_net = init_protonet(opt)
+    copy_opt = torch.optim.Adam(params=copy_net.parameters(),
+                                lr=opt.learning_rate)
+
     for epoch in range(10):
         test_iter = iter(test_dataloader)
         for batch in test_iter:
+            copy_net.load_state_dict(model.state_dict())
+            cur_opt = optim.state_dict()
+            copy_opt.__setstate__(cur_opt['state'])
+            copy_opt.zero_grad()
+
             x, y = batch
             x, y = Variable(x), Variable(y)
             if opt.cuda:
                 x, y = x.cuda(), y.cuda()
-            model_output = model(x)
-            l, acc = loss(model_output, target=y, n_support=opt.num_support_tr)
+            model_output = copy_net(x)
+            l, acc = loss(model_output, target=y, n_support=opt.num_support_tr, inner_loop=True)
+            l.backward()
+            copy_opt.step()
+
+            model_output = copy_net(x)
+            _, acc = loss(model_output, target=y, n_support=opt.num_support_tr)
             avg_acc.append(acc.data[0])
     avg_acc = np.mean(avg_acc)
     print('Test Acc: {}'.format(avg_acc))
@@ -242,13 +295,15 @@ def main():
     print('Testing with last model..')
     test(opt=options,
          test_dataloader=test_dataloader,
-         model=model)
+         model=model,
+         optim=optim)
 
     model.load_state_dict(best_state)
     print('Testing with best model..')
     test(opt=options,
          test_dataloader=test_dataloader,
-         model=model)
+         model=model,
+         optim=optim)
 
     # optim = init_optim(options, model)
     # lr_scheduler = init_lr_scheduler(options, optim)
