@@ -34,6 +34,11 @@ def get_parser():
                         help='StepLR learning rate scheduler gamma, default=0.5',
                         default=0.5)
 
+    parser.add_argument('-nI', '--num_inner',
+                        type=int,
+                        help='number of steps of inner loop, default = 1',
+                        default=1)
+
     parser.add_argument('-its', '--iterations',
                         type=int,
                         help='number of episodes per epoch, default=100',

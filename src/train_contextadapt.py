@@ -118,10 +118,8 @@ def train(opt, tr_dataloader, model, optim, lr_scheduler, val_dataloader=None):
     train_acc = []
     val_loss = []
     val_acc = []
-    pre_metatrain_loss = []
-    pre_metatrain_acc = []
-    post_metatrain_loss = []
-    post_metatrain_acc = []
+    metatrain_loss = [[] for _ in range(opt.num_inner + 1)]
+    metatrain_acc = [[] for _ in range(opt.num_inner + 1)]
     best_acc = 0
 
     best_model_path = os.path.join(opt.experiment_root, 'best_model.pth')
@@ -140,9 +138,12 @@ def train(opt, tr_dataloader, model, optim, lr_scheduler, val_dataloader=None):
 
             means = obtain_mean(model_output, y, opt.num_support_tr)
             l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr, inner_loop=True)
-            grads = torch.autograd.grad(l, means, create_graph=True)
-            adapted_means = means - inner_lr * grads[0]
-            l, acc = prototypical_loss(model_output, adapted_means, y, opt.num_support_tr)
+            for i in range(opt.num_inner):
+                grads = torch.autograd.grad(l, means, create_graph=True)
+                means = means - inner_lr * grads[0]
+                l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr, inner_loop=True)
+
+            l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr)
             optim.zero_grad()
             l.backward()
             optim.step()
@@ -163,31 +164,33 @@ def train(opt, tr_dataloader, model, optim, lr_scheduler, val_dataloader=None):
             if opt.cuda:
                 x, y = x.cuda(), y.cuda()
             model_output = model(x)
+
             means = obtain_mean(model_output, y, opt.num_support_tr)
-            means.retain_grad()
             l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr, inner_loop=True)
-            l.backward()
-            pre_metatrain_loss.append(l.data[0])
-            pre_metatrain_acc.append(acc.data[0])
-            means = means - inner_lr * means.grad
+            metatrain_loss[0].append(l.data[0])
+            metatrain_acc[0].append(acc.data[0])
+            for i in range(opt.num_inner):
+                grads = torch.autograd.grad(l, means, create_graph=True)
+                means = means - inner_lr * grads[0]
+                l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr, inner_loop=True)
+                metatrain_loss[i+1].append(l.data[0])
+                metatrain_acc[i+1].append(acc.data[0])
+
             l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr)
+
             val_loss.append(l.data[0])
             val_acc.append(acc.data[0])
-            l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr, inner_loop=True)
-            post_metatrain_loss.append(l.data[0])
-            post_metatrain_acc.append(acc.data[0])
         avg_loss = np.mean(val_loss[-opt.iterations:])
         avg_acc = np.mean(val_acc[-opt.iterations:])
-        avg_pre_metatrain_loss = np.mean(pre_metatrain_loss[-opt.iterations:])
-        avg_pre_metatrain_acc = np.mean(pre_metatrain_acc[-opt.iterations:])
-        avg_post_metatrain_loss = np.mean(post_metatrain_loss[-opt.iterations:])
-        avg_post_metatrain_acc = np.mean(post_metatrain_acc[-opt.iterations:])
         postfix = ' (Best)' if avg_acc >= best_acc else ' (Best: {})'.format(
             best_acc)
         print('Avg Val Loss: {}, Avg Val Acc: {}{}'.format(
             avg_loss, avg_acc, postfix))
-        print('Avg Pre Metatrain Loss: {}, Avg Pre Metatrain Acc: {}'.format(avg_pre_metatrain_loss, avg_pre_metatrain_acc))
-        print('Avg Post Metatrain Loss: {}, Avg Post Metatrain Acc: {}'.format(avg_post_metatrain_loss, avg_post_metatrain_acc))
+        for i in range(opt.num_inner+1):
+            avg_metatrain_loss = np.mean(metatrain_loss[i][-opt.iterations:])
+            avg_metatrain_acc = np.mean(metatrain_acc[i][-opt.iterations:])
+            print('Step {}, Avg Metatrain Loss: {}, Avg Metatrain Acc: {}'.format(i, avg_metatrain_loss, avg_metatrain_acc))
+
         if avg_acc >= best_acc:
             torch.save(model.state_dict(), best_model_path)
             best_acc = avg_acc
@@ -216,10 +219,11 @@ def test(opt, test_dataloader, model):
                 x, y = x.cuda(), y.cuda()
             model_output = model(x)
             means = obtain_mean(model_output, y, opt.num_support_tr)
-            means.retain_grad()
             l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr, inner_loop=True)
-            l.backward()
-            means = means - inner_lr * means.grad
+            for i in range(opt.num_inner):
+                grads = torch.autograd.grad(l, means, create_graph=True)
+                means = means - inner_lr * grads[0]
+                l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr, inner_loop=True)
             l, acc = prototypical_loss(model_output, means, y, opt.num_support_tr)
 
             avg_acc.append(acc.data[0])
